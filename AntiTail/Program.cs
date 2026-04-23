@@ -18,16 +18,25 @@ if (string.IsNullOrEmpty(botToken) || botToken == "Insert your token here")
 {
     throw new ArgumentNullException("BotConfig:BotToken", "Токен бота не знайдено! Перевір appsettings.Development.json");
 }
+builder.Services.AddMemoryCache();
+// 1. БАЗА ДАНИХ (Вона автоматично стає Scoped)
+builder.Services.AddDbContext<AppDBContext>(/* твої налаштування */);
 
-// 2. Реєструємо клієнт Telegram як Singleton (один на весь додаток)
+// 2. СЕРВІСИ РОБОТИ З БД (МАЮТЬ БУТИ SCOPED)
+// ВИПРАВЛЕННЯ 1: Зміни AddSingleton на AddScoped
+builder.Services.AddScoped<IRegistrationService, RegistrationService>();
+
+// 3. СЕРВІСИ ДЛЯ БОТА
+// ВИПРАВЛЕННЯ 2: Додаємо відсутній SessionService як Singleton
+builder.Services.AddSingleton<SessionService>();
+
+// Твій Google Classroom Service (краще теж Scoped або Transient)
+builder.Services.AddScoped<IBaseClassroomService, GoogleClassroomService>();
+
+// Telegram Bot
 builder.Services.AddSingleton<ITelegramBotClient>(new TelegramBotClient(botToken));
 
-builder.Services.AddSingleton<IBaseClassroomService, GoogleClassroomService>();
-
-// 3. Реєструємо твій власний сервіс
-builder.Services.AddSingleton<ITelegramService, TelegramService>();
-
-// 4. Реєструємо фоновий процес (Worker)
+// Твій Worker (Він завжди HostedService / Singleton)
 builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();

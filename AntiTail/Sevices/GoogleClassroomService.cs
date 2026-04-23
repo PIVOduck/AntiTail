@@ -3,6 +3,7 @@ using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Flows;
 using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Classroom.v1;
+using Google.Apis.Oauth2.v2.Data;
 using LightMonitorBot.DTO;
 
 namespace AntiTail.Services
@@ -79,6 +80,10 @@ namespace AntiTail.Services
         public Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId) => throw new NotImplementedException();
 
         public Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId) => throw new NotImplementedException();
+        public Task<Userinfo> GetUserInfoAsync(TokenResponse tokens)
+        {
+            throw new NotImplementedException();
+        }
 
         public Task<List<StudentDto>> GetCourseStudentsAsync(string courseId) => throw new NotImplementedException();
 

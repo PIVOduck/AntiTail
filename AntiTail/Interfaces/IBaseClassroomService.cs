@@ -14,5 +14,6 @@ public interface IBaseClassroomService
         Task<List<CourseDto>> GetUserCoursesAsync(string userId);
         Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId);
         Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId);
+        Task<Google.Apis.Oauth2.v2.Data.Userinfo> GetUserInfoAsync(TokenResponse tokens);
     
 }
