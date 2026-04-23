@@ -1,12 +1,16 @@
 using AntiTail;
+using AntiTail.DBContext;
 using LightMonitorBot;
 using AntiTail.Interfaces;
 using AntiTail.Services;
 using AntiTail.Sevices;
+using Microsoft.EntityFrameworkCore;
 using Telegram.Bot;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+var ConectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+builder.Services.AddDbContext<AppDBContext>(options => options.UseMySql(ConectionString, ServerVersion.AutoDetect(ConectionString)));
 // 1. Читаємо токен з appsettings.json
 var botToken = builder.Configuration.GetSection("BotConfig:BotToken").Value;
 

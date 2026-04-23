@@ -5,8 +5,7 @@ using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Classroom.v1;
 using LightMonitorBot.DTO;
 
-
-namespace AntiTail.Services // Ваш namespace
+namespace AntiTail.Services
 {
     public class GoogleClassroomService : ITeacherClassroomService, IStudentClassroomService
     {
@@ -14,7 +13,6 @@ namespace AntiTail.Services // Ваш namespace
         private readonly string _clientSecret;
         private readonly string _redirectUri;
 
-        // IConfiguration дозволяє читати дані з appsettings.json
         public GoogleClassroomService(IConfiguration configuration)
         {
             _clientId = configuration["GoogleAuth:ClientId"];
@@ -24,7 +22,6 @@ namespace AntiTail.Services // Ваш namespace
 
         public string GetAuthorizationUrl(string chatId)
         {
-            // Налаштовуємо "потік" авторизації Google
             var flow = new GoogleAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
             {
                 ClientSecrets = new ClientSecrets
@@ -32,80 +29,69 @@ namespace AntiTail.Services // Ваш namespace
                     ClientId = _clientId,
                     ClientSecret = _clientSecret
                 },
-                // Вказуємо, що нам потрібен доступ до курсів
-                Scopes = new[] { ClassroomService.Scope.ClassroomCoursesReadonly }
+                // 1. ВАЖЛИВО: Додали дозволи на завдання та оцінки!
+                Scopes = new[] 
+                { 
+                    ClassroomService.Scope.ClassroomCoursesReadonly,
+                    ClassroomService.Scope.ClassroomCourseworkMeReadonly,
+                    ClassroomService.Scope.ClassroomStudentSubmissionsMeReadonly
+                }
             });
 
-            // Генеруємо посилання. 
-            // Параметр state дуже важливий — туди ми "ховаємо" ChatId користувача!
-            // 1. Спочатку створюємо об'єкт запиту
-            var request = flow.CreateAuthorizationCodeRequest(_redirectUri);
-
-            // 2. Ховаємо наш ChatId у властивість State
+            var request = (Google.Apis.Auth.OAuth2.Requests.GoogleAuthorizationCodeRequestUrl)flow.CreateAuthorizationCodeRequest(_redirectUri);
             request.State = chatId;
+            
+            // 2. ВАЖЛИВО: Просимо довгостроковий Refresh Token
+            request.AccessType = "offline"; 
+            request.Prompt = "consent";
 
-            // 3. ТІЛЬКИ ТЕПЕР генеруємо (будуємо) фінальне посилання
-            var url = request.Build();
-
-            return url.AbsoluteUri;
+            return request.Build().AbsoluteUri;
         }
 
-        // ... Інші методи (AuthenticateUserAsync, GetUserCoursesAsync) 
-        // поки що можна залишити порожніми або кидати виняток NotImplementedException
-
-        public string GetAuthorizationUrl()
+        // 3. ВАЖЛИВО: Метод для обміну коду на справжні токени
+        public async Task<TokenResponse> AuthenticateUserAsync(string authCode)
         {
-            throw new NotImplementedException();
+            var flow = new GoogleAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
+            {
+                ClientSecrets = new ClientSecrets
+                {
+                    ClientId = _clientId,
+                    ClientSecret = _clientSecret
+                }
+            });
+
+            var tokenResponse = await flow.ExchangeCodeForTokenAsync(
+                userId: "user", 
+                code: authCode, 
+                redirectUri: _redirectUri, 
+                taskCancellationToken: CancellationToken.None
+            );
+
+            return tokenResponse;
         }
 
-        public Task<TokenResponse> AuthenticateUserAsync(string authCode) => throw new NotImplementedException();
+        // --- Заглушки для інших методів (їх ми реалізуємо пізніше, коли токени будуть у БД) ---
+
         public Task RevokeUserTokensAsync(string userId) => throw new NotImplementedException();
+        
         public Task<List<CourseDto>> GetUserCoursesAsync(string userId) => throw new NotImplementedException();
 
-        public Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId)
-        {
-            throw new NotImplementedException();
-        }
+        public Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId) => throw new NotImplementedException();
 
-        public Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId)
-        {
-            throw new NotImplementedException();
-        }
+        public Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId) => throw new NotImplementedException();
 
-        // ... додайте заглушки для інших методів з інтерфейсів
-        public Task<List<StudentDto>> GetCourseStudentsAsync(string courseId)
-        {
-            throw new NotImplementedException();
-        }
+        public Task<List<StudentDto>> GetCourseStudentsAsync(string courseId) => throw new NotImplementedException();
 
-        public Task InviteStudentToCourseAsync(string courseId, string studentEmail)
-        {
-            throw new NotImplementedException();
-        }
+        public Task InviteStudentToCourseAsync(string courseId, string studentEmail) => throw new NotImplementedException();
 
-        public Task<List<SubmissionDto>> GetAllSubmissionsAsync(string courseId, string assignmentId)
-        {
-            throw new NotImplementedException();
-        }
+        public Task<List<SubmissionDto>> GetAllSubmissionsAsync(string courseId, string assignmentId) => throw new NotImplementedException();
 
-        public Task GradeStudentSubmissionAsync(string courseId, string assignmentId, string submissionId, double grade)
-        {
-            throw new NotImplementedException();
-        }
+        public Task GradeStudentSubmissionAsync(string courseId, string assignmentId, string submissionId, double grade) => throw new NotImplementedException();
 
-        public Task CreateAnnouncementAsync(string courseId, string text, List<string> targetStudentIds = null)
-        {
-            throw new NotImplementedException();
-        }
+        public Task CreateAnnouncementAsync(string courseId, string text, List<string> targetStudentIds = null) => throw new NotImplementedException();
 
-        public Task<List<SubmissionDto>> GetMySubmissionsAsync(string courseId, string studentId)
-        {
-            throw new NotImplementedException();
-        }
+        public Task<List<SubmissionDto>> GetMySubmissionsAsync(string courseId, string studentId) => throw new NotImplementedException();
 
-        public Task<string> GetGradingCriteriaAsync(string courseId, string assignmentId)
-        {
-            throw new NotImplementedException();
-        }
+        public Task<string> GetGradingCriteriaAsync(string courseId, string assignmentId) => throw new NotImplementedException();
     }
 }
