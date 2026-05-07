@@ -4,6 +4,7 @@ using AntiTail.Interfaces;
 using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Oauth2.v2.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace AntiTail.Services;
 

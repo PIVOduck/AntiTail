@@ -5,6 +5,7 @@ using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Classroom.v1;
 using Google.Apis.Oauth2.v2.Data;
 using LightMonitorBot.DTO;
+using Microsoft.Extensions.Configuration;
 
 namespace AntiTail.Services
 {
@@ -35,7 +36,9 @@ namespace AntiTail.Services
                 { 
                     ClassroomService.Scope.ClassroomCoursesReadonly,
                     ClassroomService.Scope.ClassroomCourseworkMeReadonly,
-                    ClassroomService.Scope.ClassroomStudentSubmissionsMeReadonly
+                    ClassroomService.Scope.ClassroomStudentSubmissionsMeReadonly,
+                    Google.Apis.Oauth2.v2.Oauth2Service.Scope.UserinfoEmail,
+                    Google.Apis.Oauth2.v2.Oauth2Service.Scope.UserinfoProfile
                 }
             });
 
@@ -80,9 +83,20 @@ namespace AntiTail.Services
         public Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId) => throw new NotImplementedException();
 
         public Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId) => throw new NotImplementedException();
-        public Task<Userinfo> GetUserInfoAsync(TokenResponse tokens)
+        public async Task<Userinfo> GetUserInfoAsync(TokenResponse tokens)
         {
-            throw new NotImplementedException();
+            // Створюємо тимчасовий доступ (Credential) за допомогою токена доступу
+            var credential = GoogleCredential.FromAccessToken(tokens.AccessToken);
+    
+            // Створюємо сервіс для роботи з Oauth2 API
+            var oauth2Service = new Google.Apis.Oauth2.v2.Oauth2Service(new Google.Apis.Services.BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "AntiTailBot"
+            });
+
+            // Робимо запит до Google, щоб отримати інформацію про профіль (Email, Name, Id)
+            return await oauth2Service.Userinfo.Get().ExecuteAsync();
         }
 
         public Task<List<StudentDto>> GetCourseStudentsAsync(string courseId) => throw new NotImplementedException();

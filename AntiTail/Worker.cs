@@ -1,6 +1,9 @@
 using AntiTail.Interfaces;
 using AntiTail.Models;
 using AntiTail.Services;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
@@ -41,32 +44,81 @@ public class Worker : BackgroundService
     }
 
     private async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
+{
+    try
     {
-        try
+        if (update.CallbackQuery is { } cbq) { await HandleCallbackQueryAsync(bot, cbq, ct); return; }
+        if (update.Message is not { } message) return;
+        if (message.Text is not { } text) return;
+
+        long chatId = message.Chat.Id;
+        _logger.LogInformation("Повідомлення '{Text}' від {ChatId}", text, chatId);
+        var session = _sessions.GetOrCreate(chatId);
+
+        if (text == "/start") { await HandleStartAsync(bot, chatId, session, ct); return; }
+        if (text == "/cancel")
         {
-            if (update.CallbackQuery is { } cbq) { await HandleCallbackQueryAsync(bot, cbq, ct); return; }
-            if (update.Message is not { } message) return;
-            if (message.Text is not { } text) return;
-
-            long chatId = message.Chat.Id;
-            _logger.LogInformation("Повідомлення '{Text}' від {ChatId}", text, chatId);
-            var session = _sessions.GetOrCreate(chatId);
-
-            if (text == "/start") { await HandleStartAsync(bot, chatId, session, ct); return; }
-            if (text == "/cancel")
-            {
-                _sessions.Remove(chatId);
-                await bot.SendMessage(chatId, "Реєстрацію скасовано. Натисніть /start.", cancellationToken: ct);
-                return;
-            }
-
-            if (session.Step == RegistrationStep.AwaitingGroupSelect)
-                await HandleGroupSelectionInputAsync(bot, chatId, text, session, ct);
-            else
-                await bot.SendMessage(chatId, "Я розумію /start та /cancel.", cancellationToken: ct);
+            _sessions.Remove(chatId);
+            await bot.SendMessage(chatId, "Реєстрацію скасовано. Натисніть /start.", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
+            return;
         }
-        catch (Exception ex) { _logger.LogError(ex, "Помилка обробки оновлення"); }
+
+        // 1. Обробка етапу вибору групи студентом
+        if (session.Step == RegistrationStep.AwaitingGroupSelect)
+        {
+            await HandleGroupSelectionInputAsync(bot, chatId, text, session, ct);
+            return;
+        }
+
+        // 2. ОБРОБКА КНОПОК ГОЛОВНОГО МЕНЮ (якщо користувач вже авторизований)
+        if (session.Step == RegistrationStep.Completed)
+        {
+            switch (text)
+            {
+                // --- Спільні кнопки ---
+                case "📚 Мої курси":
+                    await bot.SendMessage(chatId, "Функція 'Мої курси' в розробці 🛠", cancellationToken: ct);//todo
+                    break;
+
+                // --- Кнопки Студента ---
+                case "⏰ Дедлайни":
+                    await bot.SendMessage(chatId, "Функція 'Дедлайни' в розробці 🛠", cancellationToken: ct);//todo
+                    break;
+                case "📊 Заборгованість":
+                    await bot.SendMessage(chatId, "Функція 'Заборгованість' в розробці 🛠", cancellationToken: ct);//todo
+                    break;
+                case "✉️ Написати викладачу":
+                    await bot.SendMessage(chatId, "Функція 'Написати викладачу' в розробці 🛠", cancellationToken: ct);//todo
+                    break;
+
+                // --- Кнопки Викладача ---
+                case "👥 Групи":
+                    await bot.SendMessage(chatId, "Функція 'Групи' в розробці 🛠", cancellationToken: ct);//todo
+                    break;
+                case "📋 Черга здачі":
+                    await bot.SendMessage(chatId, "Функція 'Черга здачі' в розробці 🛠", cancellationToken: ct);//todo
+                    break;
+                case "📣 Оголошення":
+                    await bot.SendMessage(chatId, "Функція 'Оголошення' в розробці 🛠", cancellationToken: ct);//todo
+                    break;
+                case "🔄 Синхронізація з Classroom":
+                    await bot.SendMessage(chatId, "🔄 Починаю синхронізацію з Google Classroom... (Заглушка)", cancellationToken: ct);//todo
+                    // Тут згодом буде виклик методу сервісу Classroom
+                    break;
+
+                // --- Невідома команда ---
+                default:
+                    await bot.SendMessage(chatId, "Невідома команда. Будь ласка, оберіть дію в меню 👇", cancellationToken: ct);
+                    break;
+            }
+            return; // Завершуємо обробку, щоб не йти далі
+        }
+
+        // 3. Якщо користувач ще не завершив реєстрацію і пише щось незрозуміле
+        await bot.SendMessage(chatId, "Я розумію /start та /cancel.", cancellationToken: ct);
     }
+    catch (Exception ex) { _logger.LogError(ex, "Помилка обробки оновлення"); }
+}
 
     private async Task HandleStartAsync(ITelegramBotClient bot, long chatId, UserSession session, CancellationToken ct)
     {
