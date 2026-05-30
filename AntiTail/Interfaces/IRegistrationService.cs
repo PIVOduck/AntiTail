@@ -1,7 +1,9 @@
+using AntiTail.Entities;
 using AntiTail.Models;
 using AntiTail.Entitys;
 using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Oauth2.v2.Data;
+using LightMonitorBot.DTO;
 
 namespace AntiTail.Interfaces;
 
@@ -31,4 +33,6 @@ public interface IRegistrationService
     // --- Групи ---
     Task<List<Group>> GetAllGroupsAsync();
     Task<Group?> GetGroupByInviteTokenAsync(string inviteToken);
-}
+
+    Task<List<Course>> SyncTeacherCoursesAsync(int teacherId, List<LightMonitorBot.DTO.CourseDto> googleCourses);
+    Task BindCourseToGroupAsync(int courseId, int groupId);}

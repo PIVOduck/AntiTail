@@ -103,15 +103,36 @@ public class Worker : BackgroundService
                 }
                 return;
             }
+            // Обробка тексту оголошення від викладача
+            if (session.Step == RegistrationStep.TeacherAwaitingAnnouncementText)
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var classroomService = scope.ServiceProvider.GetRequiredService<ITeacherClassroomService>();
 
+                // Відправляємо запит до Google Classroom (через ваш сервіс)
+                await classroomService.CreateAnnouncementAsync(session.PendingCourseId, text);
+
+                session.Step = RegistrationStep.Completed;
+                session.PendingCourseId = null;
+                _sessions.Save(chatId, session);
+
+                await bot.SendMessage(chatId, "✅ Оголошення успішно опубліковано в Google Classroom!", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+                return;
+            }
             // 4. ОБРОБКА КНОПОК ГОЛОВНОГО МЕНЮ
             if (session.Step == RegistrationStep.Completed)
             {
                 switch (text)
                 {
-                    // --- Спільні кнопки ---
                     case "📚 Мої курси":
-                        await bot.SendMessage(chatId, "Функція 'Мої курси' в розробці 🛠", cancellationToken: ct);
+                        if (session.Role == UserRole.Teacher)
+                        {
+                            await ShowTeacherCoursesAsync(bot, chatId, ct);
+                        }
+                        else
+                        {
+                            await bot.SendMessage(chatId, "Функція 'Мої курси' для студентів в розробці 🛠", cancellationToken: ct);
+                        }
                         break;
 
                     // --- Кнопки Студента ---
@@ -124,21 +145,18 @@ public class Worker : BackgroundService
                     case "✉️ Написати викладачу":
                         await bot.SendMessage(chatId, "Функція 'Написати викладачу' в розробці 🛠", cancellationToken: ct);
                         break;
-
+                    
                     // --- Кнопки Викладача ---
                     case "👥 Групи":
                         await ShowGroupsListAsync(bot, chatId, ct);
                         break;
                     case "📋 Черга здачі":
-                        await bot.SendMessage(chatId, "Функція 'Черга здачі' в розробці 🛠", cancellationToken: ct);
-                        break;
-                    case "📣 Оголошення":
-                        await bot.SendMessage(chatId, "Функція 'Оголошення' в розробці 🛠", cancellationToken: ct);
-                        break;
-                    case "🔄 Синхронізація з Classroom":
-                        await bot.SendMessage(chatId, "🔄 Починаю синхронізацію з Google Classroom... (Заглушка)", cancellationToken: ct);
+                        await ShowTeacherCoursesForSelectionAsync(bot, chatId, session, "grade_course:", RegistrationStep.TeacherAwaitingGradingCourse, ct);
                         break;
 
+                    case "📣 Оголошення":
+                        await ShowTeacherCoursesForSelectionAsync(bot, chatId, session, "announce_course:", RegistrationStep.TeacherAwaitingAnnouncementCourse, ct);
+                        break;
                     // --- Кнопки Адміна ---
                     case "📋 Список груп":
                         await ShowGroupsListAsync(bot, chatId, ct);
@@ -208,6 +226,53 @@ public class Worker : BackgroundService
                             }
                         }
                         break;
+                    
+                    case "🔄 Синхронізація з Classroom":
+    if (session.Role == UserRole.Teacher)
+    {
+        await bot.SendMessage(chatId, "⏳ Звертаюсь до Google Classroom... Зачекайте.", cancellationToken: ct);
+        
+        using var scope = _scopeFactory.CreateScope();
+        var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+        var classroomService = scope.ServiceProvider.GetRequiredService<ITeacherClassroomService>();
+        
+        var teacher = await regService.FindTeacherByTelegramIdAsync(chatId);
+        if (teacher?.AccessToken == null) 
+        {
+            await bot.SendMessage(chatId, "❌ Помилка токена. Будь ласка, авторизуйтесь наново (/start).", cancellationToken: ct);
+            return;
+        }
+
+        // 1. Отримуємо курси з Google
+        var googleCourses = await classroomService.GetUserCoursesAsync(teacher.AccessToken); 
+        
+        // 2. Синхронізуємо з базою даних
+        var savedCourses = await regService.SyncTeacherCoursesAsync(teacher.Id, googleCourses);
+        
+        // 3. Рахуємо, скільки курсів ще не мають групи
+        var unboundCourses = savedCourses.Where(c => c.GroupId == null).ToList();
+        
+        string msg = $"✅ Синхронізацію завершено!\nЗнайдено курсів: {googleCourses.Count}\n\n";
+        
+        if (unboundCourses.Any())
+        {
+            msg += $"⚠️ У вас є {unboundCourses.Count} курсів, які ще не прив'язані до груп студентів. Оберіть курс для налаштування:";
+            
+            session.Step = RegistrationStep.TeacherAwaitingCourseBindingSelectCourse;
+            _sessions.Save(chatId, session);
+            
+            var buttons = unboundCourses.Select(c => 
+                InlineKeyboardButton.WithCallbackData(c.Name, $"bind_crs:{c.Id}")
+            ).Chunk(1).Select(r => r.ToArray()).ToArray();
+            
+            await bot.SendMessage(chatId, msg, replyMarkup: new InlineKeyboardMarkup(buttons), cancellationToken: ct);
+        }
+        else
+        {
+            await bot.SendMessage(chatId, msg + "Усі ваші курси вже успішно прив'язані до груп!", cancellationToken: ct);
+        }
+    }
+    break;
                 }
                 return; 
             }
@@ -303,6 +368,75 @@ public class Worker : BackgroundService
                 await bot.SendMessage(chatId, msg, cancellationToken: ct);
             }
         }
+        // --- ОБРОБКА ДІЙ ВИКЛАДАЧА ---
+
+// 1. Викладач обрав курс для ОГОЛОШЕННЯ
+        if (data.StartsWith("announce_course:"))
+        {
+            string courseId = data.Replace("announce_course:", "");
+            session.PendingCourseId = courseId;
+            session.Step = RegistrationStep.TeacherAwaitingAnnouncementText;
+            _sessions.Save(chatId, session);
+
+            await bot.SendMessage(chatId, "Надішліть текст оголошення, який отримають студенти цього курсу:\n\n(або введіть /cancel для відміни)", cancellationToken: ct);
+            return;
+        }
+
+// 2. Викладач обрав курс для ЧЕРГИ ЗДАЧІ (Оцінювання)
+        if (data.StartsWith("grade_course:"))
+        {
+            string courseId = data.Replace("grade_course:", "");
+            session.PendingCourseId = courseId;
+            session.Step = RegistrationStep.TeacherAwaitingGradingAssignment;
+            _sessions.Save(chatId, session);
+
+            // Тут брат має додати логіку витягування Assignment з бази для цього курсу
+            await bot.SendMessage(chatId, $"Ви обрали курс. Тепер оберіть завдання (в розробці: тут буде список кнопок завдань).", cancellationToken: ct);
+            return;
+        }
+        
+        // --- ПРИВ'ЯЗКА: Крок 1 (Викладач обрав курс, показуємо групи) ---
+        if (data.StartsWith("bind_crs:") && int.TryParse(data.Replace("bind_crs:", ""), out int courseIdToBind))
+        {
+            session.PendingCourseId = courseIdToBind.ToString();
+            session.Step = RegistrationStep.TeacherAwaitingCourseBindingSelectGroup;
+            _sessions.Save(chatId, session);
+
+            using var scope = _scopeFactory.CreateScope();
+            var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+            var groups = await regService.GetAllGroupsAsync();
+
+            var buttons = groups.Select(g => 
+                InlineKeyboardButton.WithCallbackData($"{g.Cipher} ({g.CourseYear} курс)", $"bind_grp:{g.Id}")
+            ).Chunk(2).Select(r => r.ToArray()).ToArray();
+
+            await bot.SendMessage(chatId, "Оберіть групу, у якій викладається цей предмет:", replyMarkup: new InlineKeyboardMarkup(buttons), cancellationToken: ct);
+            return;
+        }
+
+// --- ПРИВ'ЯЗКА: Крок 2 (Викладач обрав групу, зберігаємо в БД) ---
+        if (data.StartsWith("bind_grp:") && int.TryParse(data.Replace("bind_grp:", ""), out int groupIdToBind))
+        {
+            if (session.PendingCourseId != null && int.TryParse(session.PendingCourseId, out int parsedCourseId))
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+        
+                await regService.BindCourseToGroupAsync(parsedCourseId, groupIdToBind);
+        
+                await bot.SendMessage(chatId, "✅ Курс успішно закріплено за групою!\nЩоб прив'язати інші курси, натисніть кнопку '🔄 Синхронізація з Classroom' ще раз.", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+            }
+            else
+            {
+                await bot.SendMessage(chatId, "❌ Помилка сесії.", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+            }
+
+            session.Step = RegistrationStep.Completed;
+            session.PendingCourseId = null;
+            _sessions.Save(chatId, session);
+            return;
+        }
+        
     }
 
     private async Task HandleRoleSelectedAsync(ITelegramBotClient bot, long chatId, UserRole role, UserSession session, CancellationToken ct)
@@ -434,5 +568,47 @@ public class Worker : BackgroundService
     {
         _logger.LogError("Polling error: {Msg}", exception is ApiRequestException api ? $"[{api.ErrorCode}] {api.Message}" : exception.ToString());
         return Task.CompletedTask;
+    }
+    private async Task ShowTeacherCoursesAsync(ITelegramBotClient bot, long chatId, CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+        var teacher = await regService.FindTeacherByTelegramIdAsync(chatId);
+
+        if (teacher == null || teacher.Courses == null || !teacher.Courses.Any())
+        {
+            await bot.SendMessage(chatId, "У вас поки немає активних курсів.", cancellationToken: ct);
+            return;
+        }
+
+        var msg = "📚 Ваші курси:\n\n";
+        foreach (var course in teacher.Courses)
+        {
+            msg += $"🔹 {course.Name} (Група: {course.Group?.Cipher})\n";
+        }
+        await bot.SendMessage(chatId, msg, cancellationToken: ct);
+    }
+
+    private async Task ShowTeacherCoursesForSelectionAsync(ITelegramBotClient bot, long chatId, UserSession session, string callbackPrefix, RegistrationStep nextStep, CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+        var teacher = await regService.FindTeacherByTelegramIdAsync(chatId);
+
+        if (teacher == null || teacher.Courses == null || !teacher.Courses.Any())
+        {
+            await bot.SendMessage(chatId, "У вас немає активних курсів для виконання цієї дії.", cancellationToken: ct);
+            return; // Виходимо, стан сесії залишається Completed!
+        }
+
+        // Якщо курси є - тільки тоді змінюємо стан, бо користувач реально буде обирати!
+        session.Step = nextStep;
+        _sessions.Save(chatId, session);
+
+        var buttons = teacher.Courses.Select(c => 
+            InlineKeyboardButton.WithCallbackData(c.Name, $"{callbackPrefix}{c.Id}")
+        ).Chunk(1).Select(r => r.ToArray()).ToArray();
+
+        await bot.SendMessage(chatId, "Оберіть курс:", replyMarkup: new InlineKeyboardMarkup(buttons), cancellationToken: ct);
     }
 }

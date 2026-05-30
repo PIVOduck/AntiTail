@@ -11,7 +11,7 @@ public interface IBaseClassroomService
         Task RevokeUserTokensAsync(string userId);
 
         // --- Загальні дані ---
-        Task<List<CourseDto>> GetUserCoursesAsync(string userId);
+        Task<List<CourseDto>> GetUserCoursesAsync(string accessToken);
         Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId);
         Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId);
         Task<Google.Apis.Oauth2.v2.Data.Userinfo> GetUserInfoAsync(TokenResponse tokens);

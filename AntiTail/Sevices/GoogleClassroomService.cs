@@ -78,7 +78,35 @@ namespace AntiTail.Services
 
         public Task RevokeUserTokensAsync(string userId) => throw new NotImplementedException();
         
-        public Task<List<CourseDto>> GetUserCoursesAsync(string userId) => throw new NotImplementedException();
+        public async Task<List<CourseDto>> GetUserCoursesAsync(string accessToken)
+        {
+            var credential = GoogleCredential.FromAccessToken(accessToken);
+            var classroomService = new ClassroomService(new Google.Apis.Services.BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "AntiTailBot"
+            });
+
+            // Формуємо запит до Google Classroom
+            var request = classroomService.Courses.List();
+            request.CourseStates = CoursesResource.ListRequest.CourseStatesEnum.ACTIVE;            request.TeacherId = "me"; // Тільки ті, де власник токена є викладачем
+
+            var response = await request.ExecuteAsync();
+            var result = new List<CourseDto>();
+
+            if (response.Courses != null)
+            {
+                foreach (var c in response.Courses)
+                {
+                    result.Add(new CourseDto
+                    {
+                        Id = c.Id,      // Це буде наш GoogleCourseId
+                        Name = c.Name   // Назва предмета
+                    });
+                }
+            }
+            return result;
+        }
 
         public Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId) => throw new NotImplementedException();
 

@@ -1,8 +1,10 @@
 using AntiTail.DBContext;
+using AntiTail.Entities;
 using AntiTail.Entitys;
 using AntiTail.Interfaces;
 using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Oauth2.v2.Data;
+using LightMonitorBot.DTO;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -22,7 +24,10 @@ public class RegistrationService : IRegistrationService
     // ─── Пошук існуючих ───────────────────────────────────────────────────────
 
     public Task<Teacher?> FindTeacherByTelegramIdAsync(long telegramChatId) =>
-        _db.Teachers.FirstOrDefaultAsync(t => t.TelegramChatId == telegramChatId);
+        _db.Teachers
+            .Include(t => t.Courses)           // Підтягуємо всі курси цього викладача
+            .ThenInclude(c => c.Group)         // Одразу підтягуємо групи для цих курсів (щоб у бота коректно виводився шифр групи)
+            .FirstOrDefaultAsync(t => t.TelegramChatId == telegramChatId);
 
     public Task<Student?> FindStudentByTelegramIdAsync(long telegramChatId) =>
         _db.Students.FirstOrDefaultAsync(s => s.TelegramChatId == telegramChatId);
@@ -127,4 +132,45 @@ public class RegistrationService : IRegistrationService
 
     public Task<Group?> GetGroupByInviteTokenAsync(string inviteToken) =>
         _db.Groups.FirstOrDefaultAsync(g => g.InviteLink == inviteToken);
+    
+    // 1. Метод синхронізації курсів
+    public async Task<List<Course>> SyncTeacherCoursesAsync(int teacherId, List<CourseDto> googleCourses)
+    {
+        var teacher = await _db.Teachers.Include(t => t.Courses).FirstOrDefaultAsync(t => t.Id == teacherId);
+        if (teacher == null) return new List<Course>();
+
+        foreach (var gc in googleCourses)
+        {
+            // Шукаємо, чи є вже такий курс у базі (за GoogleCourseId)
+            var existing = teacher.Courses.FirstOrDefault(c => c.GoogleCourseId == gc.Id);
+            if (existing == null)
+            {
+                var newCourse = new Course
+                {
+                    Name = gc.Name,
+                    GoogleCourseId = gc.Id,
+                    Status = "Active",
+                    GroupId = null // Важливо! Група поки не призначена
+                };
+                teacher.Courses.Add(newCourse);
+            }
+            else
+            {
+                existing.Name = gc.Name; // Оновлюємо назву, якщо вона змінилася в Classroom
+            }
+        }
+        await _db.SaveChangesAsync();
+        return teacher.Courses.ToList();
+    }
+
+// 2. Метод прив'язки курсу до групи
+    public async Task BindCourseToGroupAsync(int courseId, int groupId)
+    {
+        var course = await _db.Courses.FindAsync(courseId);
+        if (course != null)
+        {
+            course.GroupId = groupId;
+            await _db.SaveChangesAsync();
+        }
+    }
 }
