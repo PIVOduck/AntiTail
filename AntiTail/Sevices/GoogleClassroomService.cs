@@ -6,6 +6,7 @@ using Google.Apis.Classroom.v1;
 using Google.Apis.Oauth2.v2.Data;
 using LightMonitorBot.DTO;
 using Microsoft.Extensions.Configuration;
+using Google.Apis.Classroom.v1.Data;
 
 namespace AntiTail.Services
 {
@@ -35,8 +36,14 @@ namespace AntiTail.Services
                 Scopes = new[] 
                 { 
                     ClassroomService.Scope.ClassroomCoursesReadonly,
+                    // --- ДОЗВОЛИ ДЛЯ СТУДЕНТА ---
                     ClassroomService.Scope.ClassroomCourseworkMeReadonly,
                     ClassroomService.Scope.ClassroomStudentSubmissionsMeReadonly,
+    
+                    // --- НОВІ ДОЗВОЛИ ДЛЯ ВИКЛАДАЧА ---
+                    ClassroomService.Scope.ClassroomCourseworkStudents, // Дає право бачити завдання і ставити оцінки!
+                    ClassroomService.Scope.ClassroomAnnouncements,      // Дає право створювати оголошення
+    
                     Google.Apis.Oauth2.v2.Oauth2Service.Scope.UserinfoEmail,
                     Google.Apis.Oauth2.v2.Oauth2Service.Scope.UserinfoProfile
                 }
@@ -89,7 +96,8 @@ namespace AntiTail.Services
 
             // Формуємо запит до Google Classroom
             var request = classroomService.Courses.List();
-            request.CourseStates = CoursesResource.ListRequest.CourseStatesEnum.ACTIVE;            request.TeacherId = "me"; // Тільки ті, де власник токена є викладачем
+            request.CourseStates = CoursesResource.ListRequest.CourseStatesEnum.ACTIVE;           
+            //request.TeacherId = "me"; // Тільки ті, де власник токена є викладачем
 
             var response = await request.ExecuteAsync();
             var result = new List<CourseDto>();
@@ -108,8 +116,38 @@ namespace AntiTail.Services
             return result;
         }
 
-        public Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId) => throw new NotImplementedException();
+        public async Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId)
+        {
+            throw new NotImplementedException("Див. оновлений варіант з accessToken нижче");
+        }
+        public async Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId, string accessToken)
+        {
+            var credential = GoogleCredential.FromAccessToken(accessToken);
+            var classroomService = new ClassroomService(new Google.Apis.Services.BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "AntiTailBot"
+            });
 
+            var request = classroomService.Courses.CourseWork.List(courseId);
+            var response = await request.ExecuteAsync();
+            var result = new List<AssignmentDto>();
+
+            if (response.CourseWork != null)
+            {
+                foreach (var work in response.CourseWork)
+                {
+                    result.Add(new AssignmentDto
+                    {
+                        Id = work.Id,
+                        Title = work.Title,
+                        Description = work.Description,
+                        MaxPoints = work.MaxPoints
+                    });
+                }
+            }
+            return result;
+        }
         public Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId) => throw new NotImplementedException();
         public async Task<Userinfo> GetUserInfoAsync(TokenResponse tokens)
         {
@@ -127,17 +165,133 @@ namespace AntiTail.Services
             return await oauth2Service.Userinfo.Get().ExecuteAsync();
         }
 
-        public Task<List<StudentDto>> GetCourseStudentsAsync(string courseId) => throw new NotImplementedException();
+        public Task<List<StudentDto>> GetCourseStudentsAsync(string courseId, string accessToken) => throw new NotImplementedException();
 
         public Task InviteStudentToCourseAsync(string courseId, string studentEmail) => throw new NotImplementedException();
 
-        public Task<List<SubmissionDto>> GetAllSubmissionsAsync(string courseId, string assignmentId) => throw new NotImplementedException();
+        public async Task<List<SubmissionDto>> GetAllSubmissionsAsync(string courseId, string assignmentId, string accessToken)
+        {
+            var credential = GoogleCredential.FromAccessToken(accessToken);
+            var classroomService = new ClassroomService(new Google.Apis.Services.BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "AntiTailBot"
+            });
 
-        public Task GradeStudentSubmissionAsync(string courseId, string assignmentId, string submissionId, double grade) => throw new NotImplementedException();
+            var result = new List<SubmissionDto>();
 
+            // Просимо в Google всі здані роботи для цього конкретного завдання
+            var request = classroomService.Courses.CourseWork.StudentSubmissions.List(courseId, assignmentId);
+            var response = await request.ExecuteAsync();
+
+            if (response.StudentSubmissions != null)
+            {
+                foreach (var sub in response.StudentSubmissions)
+                {
+                    result.Add(new SubmissionDto
+                    {
+                        Id = sub.Id,
+                        AssignmentId = sub.CourseWorkId,
+                        State = sub.State, // "NEW", "TURNED_IN", "RETURNED"
+                        AssignedGrade = sub.AssignedGrade,
+                        Title = $"Робота від студента (ID: {sub.UserId})" // Поки що виводимо ID студента
+                    });
+                }
+            }
+            return result;
+        }
+
+        public async Task GradeStudentSubmissionAsync(string courseId, string assignmentId, string submissionId, double grade, string accessToken)
+        {
+            var credential = GoogleCredential.FromAccessToken(accessToken);
+            var classroomService = new ClassroomService(new Google.Apis.Services.BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "AntiTailBot"
+            });
+
+            var submission = new Google.Apis.Classroom.v1.Data.StudentSubmission
+            {
+                AssignedGrade = grade
+            };
+
+            // Виставляємо оцінку в Classroom
+            var patchRequest = classroomService.Courses.CourseWork.StudentSubmissions.Patch(
+                submission, courseId, assignmentId, submissionId);
+            patchRequest.UpdateMask = "assignedGrade";
+            await patchRequest.ExecuteAsync();
+    
+            // Рядки з Return ми просто прибрали!
+        }
+        
         public Task CreateAnnouncementAsync(string courseId, string text, List<string> targetStudentIds = null) => throw new NotImplementedException();
 
-        public Task<List<SubmissionDto>> GetMySubmissionsAsync(string courseId, string studentId) => throw new NotImplementedException();
+        public async Task<List<SubmissionDto>> GetMySubmissionsAsync(string courseId, string accessToken)
+        {
+            var credential = GoogleCredential.FromAccessToken(accessToken);
+            var classroomService = new ClassroomService(new Google.Apis.Services.BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "AntiTailBot"
+            });
+
+            var result = new List<SubmissionDto>();
+
+            // 1. Отримуємо всі завдання (CourseWork) курсу, щоб знати їх назви та дедлайни
+            var workRequest = classroomService.Courses.CourseWork.List(courseId);
+            var workResponse = await workRequest.ExecuteAsync();
+            var courseWorks = workResponse.CourseWork != null ? workResponse.CourseWork.ToList() : new List<CourseWork>();
+
+            // 2. Отримуємо всі здачі студента
+            var subRequest = classroomService.Courses.CourseWork.StudentSubmissions.List(courseId, "-"); 
+            subRequest.UserId = "me";
+            var subResponse = await subRequest.ExecuteAsync();
+
+            if (subResponse.StudentSubmissions != null)
+            {
+                foreach (var sub in subResponse.StudentSubmissions)
+                {
+                    // Шукаємо відповідне завдання, щоб взяти з нього Назву і Дедлайн
+                    var relatedWork = courseWorks.FirstOrDefault(w => w.Id == sub.CourseWorkId);
+                    
+                    bool isLate = false;
+                    
+                    // Самостійно вираховуємо дедлайн, не чекаючи на прапорці Google
+                    if (relatedWork != null && relatedWork.DueDate != null)
+                    {
+                        var dueDate = new DateTime(
+                            relatedWork.DueDate.Year ?? DateTime.UtcNow.Year,
+                            relatedWork.DueDate.Month ?? DateTime.UtcNow.Month,
+                            relatedWork.DueDate.Day ?? DateTime.UtcNow.Day,
+                            relatedWork.DueTime?.Hours ?? 23,
+                            relatedWork.DueTime?.Minutes ?? 59,
+                            0, DateTimeKind.Utc);
+
+                        // Якщо дедлайн пройшов, а робота не здана - це борг!
+                        if (dueDate < DateTime.UtcNow && sub.State != "TURNED_IN" && sub.State != "RETURNED")
+                        {
+                            isLate = true;
+                        }
+                    }
+                    else if (sub.Late.HasValue && sub.Late.Value)
+                    {
+                        isLate = true;
+                    }
+
+                    result.Add(new SubmissionDto
+                    {
+                        Id = sub.Id,
+                        AssignmentId = sub.CourseWorkId,
+                        State = sub.State,
+                        AssignedGrade = sub.AssignedGrade,
+                        Late = isLate, // Тепер це 100% точний показник боргу
+                        Title = relatedWork != null ? relatedWork.Title : $"Завдання (ID: {sub.CourseWorkId})"
+                    });
+                }
+            }
+
+            return result;
+        }
 
         public Task<string> GetGradingCriteriaAsync(string courseId, string assignmentId) => throw new NotImplementedException();
     }

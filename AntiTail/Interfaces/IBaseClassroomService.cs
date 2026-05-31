@@ -12,7 +12,7 @@ public interface IBaseClassroomService
 
         // --- Загальні дані ---
         Task<List<CourseDto>> GetUserCoursesAsync(string accessToken);
-        Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId);
+        Task<List<AssignmentDto>> GetCourseAssignmentsAsync(string courseId,string accessToken);
         Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId);
         Task<Google.Apis.Oauth2.v2.Data.Userinfo> GetUserInfoAsync(TokenResponse tokens);
     
