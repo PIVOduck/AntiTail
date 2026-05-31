@@ -101,7 +101,7 @@ public class AuthController : ControllerBase
         string htmlResponse = @"
             <html>
             <head>
-                <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+                <meta charset='utf-8'> <meta name='viewport' content='width=device-width, initial-scale=1.0'>
                 <style>
                     body { font-family: 'Segoe UI', sans-serif; text-align: center; background-color: #f4f7f6; padding-top: 15vh; }
                     .card { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); display: inline-block; }

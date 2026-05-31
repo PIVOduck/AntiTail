@@ -285,6 +285,7 @@ namespace AntiTail.Services
                         State = sub.State,
                         AssignedGrade = sub.AssignedGrade,
                         Late = isLate, // Тепер це 100% точний показник боргу
+                        UserId = sub.UserId,
                         Title = relatedWork != null ? relatedWork.Title : $"Завдання (ID: {sub.CourseWorkId})"
                     });
                 }

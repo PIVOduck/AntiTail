@@ -47,7 +47,8 @@ public enum RegistrationStep
        TeacherAwaitingGradingSubmission,
        TeacherAwaitingGradeValue,
        TeacherAwaitingCourseBindingSelectCourse,
-       TeacherAwaitingCourseBindingSelectGroup
+       TeacherAwaitingCourseBindingSelectGroup,
+       StudentAwaitingTeacherMessage
 }
  
 public enum UserRole

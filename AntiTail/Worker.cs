@@ -10,6 +10,7 @@ using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
+using Microsoft.EntityFrameworkCore;
 
 namespace AntiTail;
 
@@ -54,7 +55,7 @@ public class Worker : BackgroundService
             long chatId = message.Chat.Id;
             _logger.LogInformation("Повідомлення '{Text}' від {ChatId}", text, chatId);
             var session = _sessions.GetOrCreate(chatId);
-
+            
             if (text == "/start") { await HandleStartAsync(bot, chatId, session, ct); return; }
             if (text == "/cancel")
             {
@@ -62,7 +63,37 @@ public class Worker : BackgroundService
                 await bot.SendMessage(chatId, "Дію скасовано. Натисніть /start.", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
                 return;
             }
+            if (session.Step == RegistrationStep.StudentAwaitingTeacherMessage)
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var dbContext = scope.ServiceProvider.GetRequiredService<AntiTail.DBContext.AppDBContext>();
+    
+                var student = await dbContext.Students
+                    .Include(s => s.Group)
+                    .ThenInclude(g => g.Curator)
+                    .FirstOrDefaultAsync(s => s.TelegramChatId == chatId);
 
+                if (student?.Group?.Curator != null)
+                {
+                    string msgToTeacher = $"📩 <b>Нове повідомлення від студента!</b>\n" +
+                                          $"👤 {student.FullName} (Група {student.Group.Cipher})\n" +
+                                          $"💬: {text}";
+
+                    // Відправляємо повідомлення куратору в Телеграм
+                    await bot.SendMessage(student.Group.Curator.TelegramChatId, msgToTeacher, Telegram.Bot.Types.Enums.ParseMode.Html, cancellationToken: ct);
+        
+                    await bot.SendMessage(chatId, "✅ Ваше повідомлення успішно надіслано куратору!", replyMarkup: StudentMainMenu(), cancellationToken: ct);
+                }
+                else
+                {
+                    await bot.SendMessage(chatId, "❌ Виникла помилка: куратора не знайдено.", replyMarkup: StudentMainMenu(), cancellationToken: ct);
+                }
+
+                session.Step = RegistrationStep.Completed;
+                _sessions.Save(chatId, session);
+                return;
+            }
+            
             // 1. Обробка етапу вибору групи студентом
             if (session.Step == RegistrationStep.AwaitingGroupSelect)
             {
@@ -156,19 +187,66 @@ public class Worker : BackgroundService
                 switch (text)
                 {
                     case "📚 Мої курси":
-                        if (session.Role == UserRole.Teacher)
+                        if (session.Role == UserRole.Student)
                         {
-                            await ShowTeacherCoursesAsync(bot, chatId, ct);
-                        }
-                        else
-                        {
-                            await bot.SendMessage(chatId, "Функція 'Мої курси' для студентів в розробці 🛠", cancellationToken: ct);
+                            using var scope = _scopeFactory.CreateScope();
+                            var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+                            var classroomService = scope.ServiceProvider.GetRequiredService<IStudentClassroomService>();
+    
+                            var student = await regService.FindStudentByTelegramIdAsync(chatId);
+    
+                            // Тут можна додати блок оновлення токена студента (як у DebtAnalyzerService)
+    
+                            var courses = await classroomService.GetUserCoursesAsync(student.AccessToken);
+    
+                            if (!courses.Any())
+                            {
+                                await bot.SendMessage(chatId, "У вас поки немає активних курсів у Google Classroom.", cancellationToken: ct);
+                            }
+                            else
+                            {
+                                string msg = "📚 Ваші курси:\n\n";
+                                foreach (var course in courses)
+                                {
+                                    msg += $"🔹 {course.Name}\n";
+                                }
+                                await bot.SendMessage(chatId, msg, cancellationToken: ct);
+                            }
                         }
                         break;
 
                     // --- Кнопки Студента ---
                     case "⏰ Дедлайни":
-                        await bot.SendMessage(chatId, "Функція 'Дедлайни' в розробці 🛠", cancellationToken: ct);
+                        if (session.Role == UserRole.Student)
+                        {
+                            await bot.SendMessage(chatId, "⏳ Збираю інформацію про ваші активні завдання...", cancellationToken: ct);
+                            using var scope = _scopeFactory.CreateScope();
+                            var classroomService = scope.ServiceProvider.GetRequiredService<IStudentClassroomService>();
+                            var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+                            var student = await regService.FindStudentByTelegramIdAsync(chatId);
+        
+                            var courses = await classroomService.GetUserCoursesAsync(student.AccessToken);
+                            var upcomingTasks = new List<string>();
+
+                            foreach (var course in courses)
+                            {
+                                // Отримуємо всі роботи студента
+                                var submissions = await classroomService.GetMySubmissionsAsync(course.Id, student.AccessToken);
+            
+                                // Фільтруємо: беремо лише ті, які НЕ здані (TURNED_IN), НЕ повернуті (RETURNED) і НЕ прострочені (Late == false)
+                                var active = submissions.Where(s => s.State != "TURNED_IN" && s.State != "RETURNED" && s.Late == false).ToList();
+            
+                                foreach(var sub in active) {
+                                    upcomingTasks.Add($"🔹 {sub.Title} ({course.Name})");
+                                }
+                            }
+
+                            if (!upcomingTasks.Any()) {
+                                await bot.SendMessage(chatId, "🎉 У вас немає активних незданих завдань! Ви все зробили.", cancellationToken: ct);
+                            } else {
+                                await bot.SendMessage(chatId, "⏰ Ваші активні завдання (ще є час здати):\n\n" + string.Join("\n", upcomingTasks), cancellationToken: ct);
+                            }
+                        }
                         break;
                     // Знайти цей блок у Worker.cs (приблизно рядок 117):
                     case "📊 Заборгованість":
@@ -201,7 +279,28 @@ public class Worker : BackgroundService
                         }
                         break;
                     case "✉️ Написати викладачу":
-                        await bot.SendMessage(chatId, "Функція 'Написати викладачу' в розробці 🛠", cancellationToken: ct);
+                        if (session.Role == UserRole.Student)
+                        {
+                            using var scope = _scopeFactory.CreateScope();
+                            var dbContext = scope.ServiceProvider.GetRequiredService<AntiTail.DBContext.AppDBContext>();
+        
+                            // Знаходимо студента з його групою та куратором
+                            var student = await dbContext.Students
+                                .Include(s => s.Group)
+                                .ThenInclude(g => g.Curator)
+                                .FirstOrDefaultAsync(s => s.TelegramChatId == chatId);
+
+                            if (student?.Group?.Curator == null)
+                            {
+                                await bot.SendMessage(chatId, "У вашої групи ще немає призначеного куратора.", cancellationToken: ct);
+                                break;
+                            }
+
+                            session.Step = RegistrationStep.StudentAwaitingTeacherMessage;
+                            _sessions.Save(chatId, session);
+
+                            await bot.SendMessage(chatId, $"Напишіть ваше повідомлення для куратора ({student.Group.Curator.FullName}):\n\n(або введіть /cancel для відміни)", cancellationToken: ct);
+                        }
                         break;
                     
                     // --- Кнопки Викладача ---
@@ -228,7 +327,24 @@ public class Worker : BackgroundService
                         }
                         break;
                     case "❌ Видалити групу":
-                        await bot.SendMessage(chatId, "Функція 'Видалити групу' в розробці 🛠", cancellationToken: ct);
+                        if (session.Role == UserRole.Admin)
+                        {
+                            using var scope = _scopeFactory.CreateScope();
+                            var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+                            var groups = await regService.GetAllGroupsAsync();
+
+                            if (!groups.Any()) {
+                                await bot.SendMessage(chatId, "Немає груп для видалення.", cancellationToken: ct);
+                                break;
+                            }
+
+                            // Виводимо всі існуючі групи кнопками
+                            var buttons = groups.Select(g => 
+                                InlineKeyboardButton.WithCallbackData($"❌ {g.Cipher}", $"del_grp:{g.Id}")
+                            ).Chunk(2).Select(r => r.ToArray()).ToArray();
+
+                            await bot.SendMessage(chatId, "Оберіть групу для видалення:", replyMarkup: new InlineKeyboardMarkup(buttons), cancellationToken: ct);
+                        }
                         break;
 
                     // --- Невідома команда ---
@@ -600,11 +716,22 @@ public class Worker : BackgroundService
                 return;
             }
 
-            var buttons = turnedIn.Select(s => 
-                InlineKeyboardButton.WithCallbackData($"📝 {s.Title}", $"grade_sub:{s.Id}")
-            ).Chunk(1).Select(r => r.ToArray()).ToArray();
+            // Підключаємо базу даних для пошуку імен
+            var dbContext = scope.ServiceProvider.GetRequiredService<AntiTail.DBContext.AppDBContext>();
+            var buttonsList = new List<InlineKeyboardButton[]>();
 
-            await bot.SendMessage(chatId, "Оберіть роботу для оцінювання:", replyMarkup: new InlineKeyboardMarkup(buttons), cancellationToken: ct);
+            foreach (var s in turnedIn)
+            {
+                // Шукаємо студента в нашій базі за його Google ID
+                var student = dbContext.Students.FirstOrDefault(st => st.GoogleId == s.UserId);
+        
+                // Якщо знайшли - беремо його ПІБ, якщо ні - пишемо "Невідомий студент"
+                string studentName = student != null ? student.FullName : "Невідомий студент";
+        
+                buttonsList.Add(new[] { InlineKeyboardButton.WithCallbackData($"📝 {studentName}", $"grade_sub:{s.Id}") });
+            }
+
+            await bot.SendMessage(chatId, "Оберіть роботу для оцінювання:", replyMarkup: new InlineKeyboardMarkup(buttonsList), cancellationToken: ct);
             return;
         }
 
@@ -660,6 +787,18 @@ public class Worker : BackgroundService
             session.Step = RegistrationStep.Completed;
             session.PendingCourseId = null;
             _sessions.Save(chatId, session);
+            return;
+        }
+        if (data.StartsWith("del_grp:") && int.TryParse(data.Replace("del_grp:", ""), out int groupIdToDelete))
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var adminService = scope.ServiceProvider.GetRequiredService<IAdminService>();
+            
+            await adminService.DeleteGroupAsync(groupIdToDelete);
+            
+            // Видаляємо повідомлення з кнопками, щоб адмін не натиснув двічі
+            await bot.DeleteMessage(chatId, cbq.Message!.MessageId, cancellationToken: ct);
+            await bot.SendMessage(chatId, "✅ Групу успішно видалено з бази даних!", cancellationToken: ct);
             return;
         }
         
