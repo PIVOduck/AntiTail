@@ -141,22 +141,32 @@ public class RegistrationService : IRegistrationService
 
         foreach (var gc in googleCourses)
         {
-            // Шукаємо, чи є вже такий курс у базі (за GoogleCourseId)
             var existing = teacher.Courses.FirstOrDefault(c => c.GoogleCourseId == gc.Id);
             if (existing == null)
             {
-                var newCourse = new Course
+                // Перевіряємо глобально в БД — щоб не дублювати курс
+                var globalExisting = await _db.Courses.FirstOrDefaultAsync(c => c.GoogleCourseId == gc.Id && c.TeacherId == teacherId);
+                if (globalExisting == null)
                 {
-                    Name = gc.Name,
-                    GoogleCourseId = gc.Id,
-                    Status = "Active",
-                    GroupId = null // Важливо! Група поки не призначена
-                };
-                teacher.Courses.Add(newCourse);
+                    var newCourse = new Course
+                    {
+                        Name = gc.Name,
+                        GoogleCourseId = gc.Id,
+                        Status = "Active",
+                        GroupId = null
+                    };
+                    teacher.Courses.Add(newCourse);
+                }
+                else
+                {
+                    if (!teacher.Courses.Contains(globalExisting))
+                        teacher.Courses.Add(globalExisting);
+                    globalExisting.Name = gc.Name;
+                }
             }
             else
             {
-                existing.Name = gc.Name; // Оновлюємо назву, якщо вона змінилася в Classroom
+                existing.Name = gc.Name;
             }
         }
         await _db.SaveChangesAsync();

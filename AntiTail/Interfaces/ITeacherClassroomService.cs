@@ -15,8 +15,9 @@ public interface ITeacherClassroomService: IBaseClassroomService
     // Позначення роботи як перевіреної (виставлення оцінки)
     Task GradeStudentSubmissionAsync(string courseId, string assignmentId, string submissionId, double grade, string accessToken);
 
+    
     // --- Комунікація ---
-    // Створення оголошення для групи
     Task CreateAnnouncementAsync(string courseId, string text, List<string> targetStudentIds = null);
+    Task CreateAnnouncementAsync(string courseId, string text, string accessToken);
 
 }

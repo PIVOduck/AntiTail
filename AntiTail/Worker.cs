@@ -54,7 +54,22 @@ public class Worker : BackgroundService
 
             long chatId = message.Chat.Id;
             _logger.LogInformation("Повідомлення '{Text}' від {ChatId}", text, chatId);
-            var session = _sessions.GetOrCreate(chatId);
+                var session = _sessions.GetOrCreate(chatId);
+                if (session.Role == UserRole.Admin)
+                {
+                    using (var scope = _scopeFactory.CreateScope())
+                    {
+                        var adminService = scope.ServiceProvider.GetRequiredService<IAdminService>();
+                        var currentAdmin = await adminService.FindAdminByTelegramIdAsync(chatId);
+                    
+                        if (currentAdmin == null)
+                        {
+                            _sessions.Remove(chatId);
+                            await bot.SendMessage(chatId, "❌ Доступ заборонено. Вас було видалено зі списку адміністраторів.", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
+                            return;
+                        }
+                    }
+                }
             
             if (text == "/start") { await HandleStartAsync(bot, chatId, session, ct); return; }
             if (text == "/cancel")
@@ -73,20 +88,25 @@ public class Worker : BackgroundService
                     .ThenInclude(g => g.Curator)
                     .FirstOrDefaultAsync(s => s.TelegramChatId == chatId);
 
-                if (student?.Group?.Curator != null)
+                if (student?.Group?.Curator != null && student.Group.Curator.TelegramChatId != 0)
                 {
                     string msgToTeacher = $"📩 <b>Нове повідомлення від студента!</b>\n" +
                                           $"👤 {student.FullName} (Група {student.Group.Cipher})\n" +
                                           $"💬: {text}";
-
-                    // Відправляємо повідомлення куратору в Телеграм
-                    await bot.SendMessage(student.Group.Curator.TelegramChatId, msgToTeacher, Telegram.Bot.Types.Enums.ParseMode.Html, cancellationToken: ct);
-        
-                    await bot.SendMessage(chatId, "✅ Ваше повідомлення успішно надіслано куратору!", replyMarkup: StudentMainMenu(), cancellationToken: ct);
+                    try
+                    {
+                        await bot.SendMessage(student.Group.Curator.TelegramChatId, msgToTeacher, Telegram.Bot.Types.Enums.ParseMode.Html, cancellationToken: ct);
+                        await bot.SendMessage(chatId, "✅ Ваше повідомлення успішно надіслано куратору!", replyMarkup: StudentMainMenu(), cancellationToken: ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Не вдалося надіслати повідомлення куратору {CuratorId}", student.Group.Curator.TelegramChatId);
+                        await bot.SendMessage(chatId, "❌ Не вдалося доставити повідомлення куратору. Можливо, він ще не запустив бота.", replyMarkup: StudentMainMenu(), cancellationToken: ct);
+                    }
                 }
                 else
                 {
-                    await bot.SendMessage(chatId, "❌ Виникла помилка: куратора не знайдено.", replyMarkup: StudentMainMenu(), cancellationToken: ct);
+                    await bot.SendMessage(chatId, "❌ Виникла помилка: куратора не знайдено або він ще не зареєстрований у боті.", replyMarkup: StudentMainMenu(), cancellationToken: ct);
                 }
 
                 session.Step = RegistrationStep.Completed;
@@ -141,23 +161,73 @@ public class Worker : BackgroundService
                     using var scope = _scopeFactory.CreateScope();
                     var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
                     var classroomService = scope.ServiceProvider.GetRequiredService<ITeacherClassroomService>();
+                    var config = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>();
+                    var dbContext = scope.ServiceProvider.GetRequiredService<AntiTail.DBContext.AppDBContext>();
+                    
                     var teacher = await regService.FindTeacherByTelegramIdAsync(chatId);
 
-                    // Відправляємо оцінку в Google Classroom!
-                    await classroomService.GradeStudentSubmissionAsync(
-                        session.PendingCourseId, 
-                        session.PendingAssignmentId, 
-                        session.PendingSubmissionId, 
-                        grade, 
-                        teacher.AccessToken);
+                    // --- ОНОВЛЕННЯ ТОКЕНА ПЕРЕД ВІДПРАВКОЮ ОЦІНКИ ---
+                    if (teacher != null && !string.IsNullOrEmpty(teacher.RefreshToken))
+                    {
+                        if (teacher.TokenExpiresAt == null || teacher.TokenExpiresAt <= DateTime.UtcNow.AddMinutes(5))
+                        {
+                            try
+                            {
+                                using var httpClient = new System.Net.Http.HttpClient();
+                                var request = new System.Net.Http.FormUrlEncodedContent(new[]
+                                {
+                                    new KeyValuePair<string, string>("client_id", config["GoogleAuth:ClientId"]),
+                                    new KeyValuePair<string, string>("client_secret", config["GoogleAuth:ClientSecret"]),
+                                    new KeyValuePair<string, string>("refresh_token", teacher.RefreshToken),
+                                    new KeyValuePair<string, string>("grant_type", "refresh_token")
+                                });
+                                var response = await httpClient.PostAsync("https://oauth2.googleapis.com/token", request);
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    var json = await response.Content.ReadAsStringAsync();
+                                    var newTokens = System.Text.Json.JsonSerializer.Deserialize<GoogleTokenResponse>(json);
+                                    if (newTokens != null && !string.IsNullOrEmpty(newTokens.AccessToken))
+                                    {
+                                        teacher.AccessToken = newTokens.AccessToken;
+                                        teacher.TokenExpiresAt = DateTime.UtcNow.AddSeconds(newTokens.ExpiresIn);
+                                        dbContext.Teachers.Update(teacher);
+                                        await dbContext.SaveChangesAsync();
+                                    }
+                                }
+                            }
+                            catch (Exception ex) { _logger.LogError(ex, "Помилка оновлення токена перед оцінюванням"); }
+                        }
+                    }
 
-                    session.Step = RegistrationStep.Completed;
-                    session.PendingCourseId = null;
-                    session.PendingAssignmentId = null;
-                    session.PendingSubmissionId = null;
-                    _sessions.Save(chatId, session);
+                    if (teacher?.AccessToken == null)
+                    {
+                        await bot.SendMessage(chatId, "❌ Помилка авторизації (немає токена). Спробуйте виконати /start.", cancellationToken: ct);
+                        return;
+                    }
 
-                    await bot.SendMessage(chatId, $"✅ Оцінку {grade} успішно виставлено! Студент отримає сповіщення.", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+                    try
+                    {
+                        // Відправляємо оцінку в Google Classroom
+                        await classroomService.GradeStudentSubmissionAsync(
+                            session.PendingCourseId, 
+                            session.PendingAssignmentId, 
+                            session.PendingSubmissionId, 
+                            grade, 
+                            teacher.AccessToken);
+
+                        session.Step = RegistrationStep.Completed;
+                        session.PendingCourseId = null;
+                        session.PendingAssignmentId = null;
+                        session.PendingSubmissionId = null;
+                        _sessions.Save(chatId, session);
+
+                        await bot.SendMessage(chatId, $"✅ Оцінку {grade} успішно виставлено! Студент отримає сповіщення.", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Помилка при виставленні оцінки в Classroom");
+                        await bot.SendMessage(chatId, $"❌ Не вдалося відправити оцінку в Google Classroom. Помилка: {ex.Message}", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+                    }
                 }
                 else
                 {
@@ -166,21 +236,70 @@ public class Worker : BackgroundService
                 return;
             }
             // Обробка тексту оголошення від викладача
-            if (session.Step == RegistrationStep.TeacherAwaitingAnnouncementText)
+           if (session.Step == RegistrationStep.TeacherAwaitingAnnouncementText)
+{
+    using var scope = _scopeFactory.CreateScope();
+    var classroomService = scope.ServiceProvider.GetRequiredService<GoogleClassroomService>();
+    var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+    var config = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>();
+    var dbContext = scope.ServiceProvider.GetRequiredService<AntiTail.DBContext.AppDBContext>();
+
+    var teacher = await regService.FindTeacherByTelegramIdAsync(chatId);
+
+    // Оновлення токена перед відправкою оголошення
+    if (teacher != null && !string.IsNullOrEmpty(teacher.RefreshToken))
+    {
+        if (teacher.TokenExpiresAt == null || teacher.TokenExpiresAt <= DateTime.UtcNow.AddMinutes(5))
+        {
+            try
             {
-                using var scope = _scopeFactory.CreateScope();
-                var classroomService = scope.ServiceProvider.GetRequiredService<ITeacherClassroomService>();
-
-                // Відправляємо запит до Google Classroom (через ваш сервіс)
-                await classroomService.CreateAnnouncementAsync(session.PendingCourseId, text);
-
-                session.Step = RegistrationStep.Completed;
-                session.PendingCourseId = null;
-                _sessions.Save(chatId, session);
-
-                await bot.SendMessage(chatId, "✅ Оголошення успішно опубліковано в Google Classroom!", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
-                return;
+                using var httpClient = new System.Net.Http.HttpClient();
+                var req = new System.Net.Http.FormUrlEncodedContent(new[]
+                {
+                    new KeyValuePair<string, string>("client_id", config["GoogleAuth:ClientId"]),
+                    new KeyValuePair<string, string>("client_secret", config["GoogleAuth:ClientSecret"]),
+                    new KeyValuePair<string, string>("refresh_token", teacher.RefreshToken),
+                    new KeyValuePair<string, string>("grant_type", "refresh_token")
+                });
+                var resp = await httpClient.PostAsync("https://oauth2.googleapis.com/token", req);
+                if (resp.IsSuccessStatusCode)
+                {
+                    var json = await resp.Content.ReadAsStringAsync();
+                    var newTokens = System.Text.Json.JsonSerializer.Deserialize<GoogleTokenResponse>(json);
+                    if (newTokens != null && !string.IsNullOrEmpty(newTokens.AccessToken))
+                    {
+                        teacher.AccessToken = newTokens.AccessToken;
+                        teacher.TokenExpiresAt = DateTime.UtcNow.AddSeconds(newTokens.ExpiresIn);
+                        dbContext.Teachers.Update(teacher);
+                        await dbContext.SaveChangesAsync();
+                    }
+                }
             }
+            catch (Exception ex) { _logger.LogError(ex, "Помилка оновлення токена перед оголошенням"); }
+        }
+    }
+
+    if (teacher?.AccessToken == null)
+    {
+        await bot.SendMessage(chatId, "❌ Помилка авторизації. Спробуйте /start.", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+        return;
+    }
+
+    try
+    {
+        await classroomService.CreateAnnouncementAsync(session.PendingCourseId, text, teacher.AccessToken);
+        session.Step = RegistrationStep.Completed;
+        session.PendingCourseId = null;
+        _sessions.Save(chatId, session);
+        await bot.SendMessage(chatId, "✅ Оголошення успішно опубліковано в Google Classroom!", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Помилка при створенні оголошення");
+        await bot.SendMessage(chatId, $"❌ Не вдалося опублікувати оголошення: {ex.Message}", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+    }
+    return;
+}
             // 4. ОБРОБКА КНОПОК ГОЛОВНОГО МЕНЮ
             if (session.Step == RegistrationStep.Completed)
             {
@@ -195,8 +314,6 @@ public class Worker : BackgroundService
     
                             var student = await regService.FindStudentByTelegramIdAsync(chatId);
     
-                            // Тут можна додати блок оновлення токена студента (як у DebtAnalyzerService)
-    
                             var courses = await classroomService.GetUserCoursesAsync(student.AccessToken);
     
                             if (!courses.Any())
@@ -209,6 +326,84 @@ public class Worker : BackgroundService
                                 foreach (var course in courses)
                                 {
                                     msg += $"🔹 {course.Name}\n";
+                                }
+                                await bot.SendMessage(chatId, msg, cancellationToken: ct);
+                            }
+                        }
+                        else if (session.Role == UserRole.Teacher)
+                        {
+                            await bot.SendMessage(chatId, "⏳ Синхронізація ваших курсів з Google Classroom... Зачекайте.", cancellationToken: ct);
+                            
+                            using var scope = _scopeFactory.CreateScope();
+                            var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+                            var classroomService = scope.ServiceProvider.GetRequiredService<ITeacherClassroomService>();
+                            var config = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>();
+                            var dbContext = scope.ServiceProvider.GetRequiredService<AntiTail.DBContext.AppDBContext>();
+                            
+                            var teacher = await regService.FindTeacherByTelegramIdAsync(chatId);
+                            
+                            // Автоматичне оновлення токена викладача, якщо він застарів
+                            if (teacher != null && !string.IsNullOrEmpty(teacher.RefreshToken))
+                            {
+                                if (teacher.TokenExpiresAt == null || teacher.TokenExpiresAt <= DateTime.UtcNow.AddMinutes(5))
+                                {
+                                    try
+                                    {
+                                        using var httpClient = new System.Net.Http.HttpClient();
+                                        var request = new System.Net.Http.FormUrlEncodedContent(new[]
+                                        {
+                                            new KeyValuePair<string, string>("client_id", config["GoogleAuth:ClientId"]),
+                                            new KeyValuePair<string, string>("client_secret", config["GoogleAuth:ClientSecret"]),
+                                            new KeyValuePair<string, string>("refresh_token", teacher.RefreshToken),
+                                            new KeyValuePair<string, string>("grant_type", "refresh_token")
+                                        });
+
+                                        var response = await httpClient.PostAsync("https://oauth2.googleapis.com/token", request);
+                                        if (response.IsSuccessStatusCode)
+                                        {
+                                            var json = await response.Content.ReadAsStringAsync();
+                                            var newTokens = System.Text.Json.JsonSerializer.Deserialize<GoogleTokenResponse>(json);
+                                            if (newTokens != null && !string.IsNullOrEmpty(newTokens.AccessToken))
+                                            {
+                                                teacher.AccessToken = newTokens.AccessToken;
+                                                teacher.TokenExpiresAt = DateTime.UtcNow.AddSeconds(newTokens.ExpiresIn);
+                                                
+                                                dbContext.Teachers.Update(teacher);
+                                                await dbContext.SaveChangesAsync();
+                                            }
+                                        }
+                                    }
+                                    catch (Exception ex) { _logger.LogError(ex, "Помилка оновлення токена в 'Мої курси'"); }
+                                }
+                            }
+
+                            if (teacher?.AccessToken == null) 
+                            {
+                                await bot.SendMessage(chatId, "❌ Помилка токена. Будь ласка, авторизуйтесь наново (/start).", cancellationToken: ct);
+                                break;
+                            }
+
+                            // Синхронізуємо з Google Classroom
+                            var googleCourses = await classroomService.GetUserCoursesAsync(teacher.AccessToken); 
+                            await regService.SyncTeacherCoursesAsync(teacher.Id, googleCourses);
+                            
+                            // Дістаємо оновлені дані з бази разом із шифрами груп
+                            var updatedTeacher = await dbContext.Teachers
+                                .Include(t => t.Courses)
+                                .ThenInclude(c => c.Group)
+                                .FirstOrDefaultAsync(t => t.TelegramChatId == chatId);
+
+                            if (updatedTeacher == null || updatedTeacher.Courses == null || !updatedTeacher.Courses.Any())
+                            {
+                                await bot.SendMessage(chatId, "У вас поки немає активних курсів у Google Classroom.", cancellationToken: ct);
+                            }
+                            else
+                            {
+                                string msg = "📚 Ваші актуальні курси:\n\n";
+                                foreach (var course in updatedTeacher.Courses)
+                                {
+                                    string groupInfo = course.Group != null ? $"Група: {course.Group.Cipher}" : "❌ не прив'язано до групи";
+                                    msg += $"🔹 {course.Name} ({groupInfo})\n";
                                 }
                                 await bot.SendMessage(chatId, msg, cancellationToken: ct);
                             }
@@ -321,6 +516,15 @@ public class Worker : BackgroundService
                     case "➕ Створити групу":
                         if (session.Role == UserRole.Admin)
                         {
+                            // Перевіряємо чи адмін ще існує в БД
+                            using var scopeAdminCreate = _scopeFactory.CreateScope();
+                            var adminSvcCreate = scopeAdminCreate.ServiceProvider.GetRequiredService<IAdminService>();
+                            if (await adminSvcCreate.FindAdminByTelegramIdAsync(chatId) == null)
+                            {
+                                _sessions.Remove(chatId);
+                                await bot.SendMessage(chatId, "❌ Доступ заборонено. Вас було видалено зі списку адміністраторів.", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
+                                break;
+                            }
                             session.Step = RegistrationStep.AwaitingNewGroupCipher;
                             _sessions.Save(chatId, session);
                             await bot.SendMessage(chatId, "Введіть шифр нової групи (наприклад, КН-21):\n\nАбо введіть /cancel щоб скасувати.", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
@@ -329,6 +533,15 @@ public class Worker : BackgroundService
                     case "❌ Видалити групу":
                         if (session.Role == UserRole.Admin)
                         {
+                            // Перевіряємо чи адмін ще існує в БД
+                            using var scopeAdminDel = _scopeFactory.CreateScope();
+                            var adminSvcDel = scopeAdminDel.ServiceProvider.GetRequiredService<IAdminService>();
+                            if (await adminSvcDel.FindAdminByTelegramIdAsync(chatId) == null)
+                            {
+                                _sessions.Remove(chatId);
+                                await bot.SendMessage(chatId, "❌ Доступ заборонено. Вас було видалено зі списку адміністраторів.", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
+                                break;
+                            }
                             using var scope = _scopeFactory.CreateScope();
                             var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
                             var groups = await regService.GetAllGroupsAsync();
@@ -352,6 +565,17 @@ public class Worker : BackgroundService
                         await bot.SendMessage(chatId, "Невідома команда. Будь ласка, оберіть дію в меню 👇", cancellationToken: ct);
                         break;
                     case "👨‍🏫 Викладачі":
+                        if (session.Role == UserRole.Admin)
+                        {
+                            using var scopeAdminT = _scopeFactory.CreateScope();
+                            var adminSvcT = scopeAdminT.ServiceProvider.GetRequiredService<IAdminService>();
+                            if (await adminSvcT.FindAdminByTelegramIdAsync(chatId) == null)
+                            {
+                                _sessions.Remove(chatId);
+                                await bot.SendMessage(chatId, "❌ Доступ заборонено. Вас було видалено зі списку адміністраторів.", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
+                                break;
+                            }
+                        }
                         using (var scope = _scopeFactory.CreateScope())
                         {
                             var adminService = scope.ServiceProvider.GetRequiredService<IAdminService>();
@@ -548,6 +772,21 @@ public class Worker : BackgroundService
         string data = cbq.Data ?? "";
         await bot.AnswerCallbackQuery(cbq.Id, cancellationToken: ct);
         var session = _sessions.GetOrCreate(chatId);
+        if (session.Role == UserRole.Admin)
+        {
+            using (var scope = _scopeFactory.CreateScope())
+            {
+                var adminService = scope.ServiceProvider.GetRequiredService<IAdminService>();
+                var currentAdmin = await adminService.FindAdminByTelegramIdAsync(chatId);
+                
+                if (currentAdmin == null)
+                {
+                    _sessions.Remove(chatId);
+                    await bot.SendMessage(chatId, "❌ Доступ заборонено. Дія скасована, оскільки вас було видалено.", cancellationToken: ct);
+                    return;
+                }
+            }
+        }
 
         if (data == "role:student") { await HandleRoleSelectedAsync(bot, chatId, UserRole.Student, session, ct); return; }
         if (data == "role:teacher") { await HandleRoleSelectedAsync(bot, chatId, UserRole.Teacher, session, ct); return; }
@@ -720,19 +959,29 @@ public class Worker : BackgroundService
             var dbContext = scope.ServiceProvider.GetRequiredService<AntiTail.DBContext.AppDBContext>();
             var buttonsList = new List<InlineKeyboardButton[]>();
 
+// Один запит до БД для всіх студентів одразу
+            var userIds = turnedIn
+                .Where(s => !string.IsNullOrEmpty(s.UserId))
+                .Select(s => s.UserId)
+                .Distinct()
+                .ToList();
+
+            var knownStudents = await dbContext.Students
+                .Where(st => userIds.Contains(st.GoogleId))
+                .ToDictionaryAsync(st => st.GoogleId!, st => st.FullName);
+
+            int queueNumber = 1;
             foreach (var s in turnedIn)
             {
-                // Шукаємо студента в нашій базі за його Google ID
-                var student = dbContext.Students.FirstOrDefault(st => st.GoogleId == s.UserId);
-        
-                // Якщо знайшли - беремо його ПІБ, якщо ні - пишемо "Невідомий студент"
-                string studentName = student != null ? student.FullName : "Невідомий студент";
-        
-                buttonsList.Add(new[] { InlineKeyboardButton.WithCallbackData($"📝 {studentName}", $"grade_sub:{s.Id}") });
+                string studentName = (!string.IsNullOrEmpty(s.UserId) && knownStudents.TryGetValue(s.UserId, out var name))
+                    ? name
+                    : $"Студент (GoogleID: {s.UserId?.Substring(0, Math.Min(8, s.UserId?.Length ?? 0))}...)";
+                buttonsList.Add(new[] { InlineKeyboardButton.WithCallbackData($"{queueNumber}. 📝 {studentName}", $"grade_sub:{s.Id}") });
+                queueNumber++;
             }
 
-            await bot.SendMessage(chatId, "Оберіть роботу для оцінювання:", replyMarkup: new InlineKeyboardMarkup(buttonsList), cancellationToken: ct);
-            return;
+            await bot.SendMessage(chatId, $"📋 Черга здачі ({turnedIn.Count} студент(ів)). Оберіть роботу для оцінювання:", replyMarkup: new InlineKeyboardMarkup(buttonsList), cancellationToken: ct);
+            return; // ← БУВ ВІДСУТНІЙ: без нього одразу виконувався grade_sub блок нижче
         }
 
 // 4. Викладач обрав конкретну РОБОТУ студента
@@ -960,17 +1209,23 @@ public class Worker : BackgroundService
         var regService = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
         var teacher = await regService.FindTeacherByTelegramIdAsync(chatId);
 
-        if (teacher == null || teacher.Courses == null || !teacher.Courses.Any())
+        // Фільтруємо лише активні курси (не архівовані)
+        var activeCourses = teacher?.Courses?
+            .Where(c => c.Status == "Active" || string.IsNullOrEmpty(c.Status))
+            .ToList();
+
+        if (teacher == null || activeCourses == null || !activeCourses.Any())
         {
-            await bot.SendMessage(chatId, "У вас немає активних курсів для виконання цієї дії.", cancellationToken: ct);
-            return; // Виходимо, стан сесії залишається Completed!
+            await bot.SendMessage(chatId,
+                "У вас немає активних курсів.\n\n💡 Натисніть '🔄 Синхронізація з Classroom' щоб завантажити ваші курси.",
+                cancellationToken: ct);
+            return;
         }
 
-        // Якщо курси є - тільки тоді змінюємо стан, бо користувач реально буде обирати!
         session.Step = nextStep;
         _sessions.Save(chatId, session);
 
-        var buttons = teacher.Courses.Select(c => 
+        var buttons = activeCourses.Select(c =>
             InlineKeyboardButton.WithCallbackData(c.Name, $"{callbackPrefix}{c.Id}")
         ).Chunk(1).Select(r => r.ToArray()).ToArray();
 

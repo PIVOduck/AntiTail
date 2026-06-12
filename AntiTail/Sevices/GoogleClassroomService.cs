@@ -192,9 +192,10 @@ namespace AntiTail.Services
                     {
                         Id = sub.Id,
                         AssignmentId = sub.CourseWorkId,
-                        State = sub.State, // "NEW", "TURNED_IN", "RETURNED"
+                        State = sub.State,
                         AssignedGrade = sub.AssignedGrade,
-                        Title = $"Робота від студента (ID: {sub.UserId})" // Поки що виводимо ID студента
+                        UserId = sub.UserId,   // ← ЦЕЙ РЯДОК БУВ ВІДСУТНІЙ — без нього черга здачі не знала хто здав
+                        Title = $"Робота від студента (ID: {sub.UserId})"
                     });
                 }
             }
@@ -224,8 +225,28 @@ namespace AntiTail.Services
             // Рядки з Return ми просто прибрали!
         }
         
-        public Task CreateAnnouncementAsync(string courseId, string text, List<string> targetStudentIds = null) => throw new NotImplementedException();
+        public async Task CreateAnnouncementAsync(string courseId, string text, List<string> targetStudentIds = null)
+        {
+            throw new InvalidOperationException("Використовуйте CreateAnnouncementAsync(courseId, text, accessToken).");
+        }
 
+        public async Task CreateAnnouncementAsync(string courseId, string text, string accessToken)
+        {
+            var credential = GoogleCredential.FromAccessToken(accessToken);
+            var classroomService = new ClassroomService(new Google.Apis.Services.BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "AntiTailBot"
+            });
+
+            var announcement = new Google.Apis.Classroom.v1.Data.Announcement
+            {
+                Text = text,
+                State = "PUBLISHED"
+            };
+
+            await classroomService.Courses.Announcements.Create(announcement, courseId).ExecuteAsync();
+        }
         public async Task<List<SubmissionDto>> GetMySubmissionsAsync(string courseId, string accessToken)
         {
             var credential = GoogleCredential.FromAccessToken(accessToken);

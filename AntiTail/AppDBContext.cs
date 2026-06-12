@@ -80,6 +80,10 @@ public class AppDBContext : DbContext
         modelBuilder.Entity<Teacher>()
             .HasIndex(T => T.CorporateEmail)
             .IsUnique();
+        
+        modelBuilder.Entity<Course>()
+            .HasIndex(c => c.GoogleCourseId)
+            .IsUnique();
 
         // 2. Додаємо унікальний індекс для Telegram ID Адміна
         modelBuilder.Entity<Admin>()
