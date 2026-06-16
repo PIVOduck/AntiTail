@@ -61,7 +61,7 @@ public class DebtAnalyzerService : IDebtAnalyzerService
         
         // Просто беремо ті, де Late == true
         var overdueSubmissions = submissions.Where(s => s.Late == true).ToList();
-
+        overdueSubmissions.ForEach(s => s.CourseName = course.Name);
         debts.AddRange(overdueSubmissions);
     }
 

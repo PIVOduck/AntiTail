@@ -18,6 +18,7 @@ public class UserSession
     public string? PendingCourseId { get; set; }
     public string? PendingAssignmentId { get; set; }
     public string? PendingSubmissionId { get; set; }
+    public int? PendingTeacherId { get; set; }
 }
  
 public enum RegistrationStep

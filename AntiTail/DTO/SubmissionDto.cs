@@ -12,4 +12,5 @@ public class SubmissionDto
     // ВАЖЛИВО: Додаємо властивість Late
     public bool? Late { get; set; } 
     public string Title { get; set; }
+    public string? CourseName { get; set; }
 }

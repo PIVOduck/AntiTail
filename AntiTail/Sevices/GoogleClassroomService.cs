@@ -148,6 +148,67 @@ namespace AntiTail.Services
             }
             return result;
         }
+        public async Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId, string accessToken)
+        {
+            var credential = GoogleCredential.FromAccessToken(accessToken);
+            var classroomService = new ClassroomService(new Google.Apis.Services.BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "AntiTailBot"
+            });
+
+            var result = new List<AnnouncementDto>();
+
+            // Отримуємо Announcements (оголошення від викладача)
+            try
+            {
+                var annRequest = classroomService.Courses.Announcements.List(courseId);
+                annRequest.AnnouncementStates = CoursesResource.AnnouncementsResource.ListRequest.AnnouncementStatesEnum.PUBLISHED;
+                annRequest.PageSize = 10;
+                var annResponse = await annRequest.ExecuteAsync();
+
+                if (annResponse.Announcements != null)
+                {
+                    foreach (var a in annResponse.Announcements)
+                    {
+                        result.Add(new AnnouncementDto
+                        {
+                            Id = a.Id,
+                            Text = a.Text ?? "(без тексту)",
+                            UpdateTime = (a.UpdateTime?.ToString() ?? a.CreationTime?.ToString() ?? "")
+                        });
+                    }
+                }
+            }
+            catch { /* якщо немає прав — просто повертаємо порожній список */ }
+
+            // Також отримуємо матеріали (MATERIAL CourseWork) — туди записуються оголошення від нашого бота
+            try
+            {
+                var matRequest = classroomService.Courses.CourseWork.List(courseId);
+                matRequest.CourseWorkStates = CoursesResource.CourseWorkResource.ListRequest.CourseWorkStatesEnum.PUBLISHED;
+                matRequest.PageSize = 10;
+                var matResponse = await matRequest.ExecuteAsync();
+
+                if (matResponse.CourseWork != null)
+                {
+                    foreach (var m in matResponse.CourseWork.Where(w => w.WorkType == "MATERIAL"))
+                    {
+                        result.Add(new AnnouncementDto
+                        {
+                            Id = m.Id,
+                            Text = $"{m.Title}\n{m.Description}".Trim(),
+                            UpdateTime = (m.UpdateTime?.ToString() ?? m.CreationTime?.ToString() ?? "")
+                        });
+                    }
+                }
+            }
+            catch { }
+
+            // Сортуємо від найновіших
+            return result.OrderByDescending(a => a.UpdateTime).ToList();
+        }
+
         public Task<List<AnnouncementDto>> GetCourseAnnouncementsAsync(string courseId) => throw new NotImplementedException();
         public async Task<Userinfo> GetUserInfoAsync(TokenResponse tokens)
         {
@@ -192,9 +253,9 @@ namespace AntiTail.Services
                     {
                         Id = sub.Id,
                         AssignmentId = sub.CourseWorkId,
-                        State = sub.State,
+                        State = sub.State, // "NEW", "TURNED_IN", "RETURNED"
                         AssignedGrade = sub.AssignedGrade,
-                        UserId = sub.UserId,   // ← ЦЕЙ РЯДОК БУВ ВІДСУТНІЙ — без нього черга здачі не знала хто здав
+                        UserId = sub.UserId,
                         Title = $"Робота від студента (ID: {sub.UserId})"
                     });
                 }
@@ -239,14 +300,21 @@ namespace AntiTail.Services
                 ApplicationName = "AntiTailBot"
             });
 
-            var announcement = new Google.Apis.Classroom.v1.Data.Announcement
+            // Використовуємо CourseWork типу MATERIAL:
+            // - не потребує оцінювання
+            // - відображається в стрічці курсу
+            // - надсилає push-сповіщення всім студентам курсу автоматично
+            var material = new Google.Apis.Classroom.v1.Data.CourseWork
             {
-                Text = text,
+                Title = "📣 Оголошення від викладача",
+                Description = text,
+                WorkType = "ASSIGNMENT",
                 State = "PUBLISHED"
             };
 
-            await classroomService.Courses.Announcements.Create(announcement, courseId).ExecuteAsync();
+            await classroomService.Courses.CourseWork.Create(material, courseId).ExecuteAsync();
         }
+
         public async Task<List<SubmissionDto>> GetMySubmissionsAsync(string courseId, string accessToken)
         {
             var credential = GoogleCredential.FromAccessToken(accessToken);
