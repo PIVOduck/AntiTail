@@ -159,51 +159,80 @@ namespace AntiTail.Services
 
             var result = new List<AnnouncementDto>();
 
+            // Отримуємо список викладачів курсу щоб показувати їх імена
+            var teacherNames = new Dictionary<string, string>(); // userId -> fullName
+            try
+            {
+                var teachersRequest = classroomService.Courses.Teachers.List(courseId);
+                teachersRequest.Fields = "teachers(userId,profile(name,emailAddress))";
+                var teachersResponse = await teachersRequest.ExecuteAsync();
+                if (teachersResponse.Teachers != null)
+                {
+                    foreach (var t in teachersResponse.Teachers)
+                    {
+                        var name = t.Profile?.Name?.FullName ?? t.Profile?.EmailAddress ?? "Викладач";
+                        teacherNames[t.UserId] = name;
+                    }
+                }
+            }
+            catch { }
+
             // Отримуємо Announcements (оголошення від викладача)
             try
             {
                 var annRequest = classroomService.Courses.Announcements.List(courseId);
                 annRequest.AnnouncementStates = CoursesResource.AnnouncementsResource.ListRequest.AnnouncementStatesEnum.PUBLISHED;
-                annRequest.PageSize = 10;
+                annRequest.PageSize = 20;
                 var annResponse = await annRequest.ExecuteAsync();
 
                 if (annResponse.Announcements != null)
                 {
                     foreach (var a in annResponse.Announcements)
                     {
+                        string authorName = (!string.IsNullOrEmpty(a.CreatorUserId) && teacherNames.TryGetValue(a.CreatorUserId, out var n)) ? n : "Викладач";
                         result.Add(new AnnouncementDto
                         {
                             Id = a.Id,
-                            Text = a.Text ?? "(без тексту)",
+                            Text = $"👤 <i>{authorName}</i>\n{a.Text ?? "(без тексту)"}",
                             UpdateTime = (a.UpdateTime?.ToString() ?? a.CreationTime?.ToString() ?? "")
                         });
                     }
                 }
             }
-            catch { /* якщо немає прав — просто повертаємо порожній список */ }
+            catch (Exception ex)
+            {
+                // Якщо немає прав на Announcements — продовжуємо, спробуємо матеріали
+            }
 
-            // Також отримуємо матеріали (MATERIAL CourseWork) — туди записуються оголошення від нашого бота
+            int beforeMaterials = result.Count;
+
+            // Також отримуємо матеріали (MATERIAL CourseWork)
             try
             {
                 var matRequest = classroomService.Courses.CourseWork.List(courseId);
                 matRequest.CourseWorkStates = CoursesResource.CourseWorkResource.ListRequest.CourseWorkStatesEnum.PUBLISHED;
-                matRequest.PageSize = 10;
+                matRequest.PageSize = 20;
                 var matResponse = await matRequest.ExecuteAsync();
 
                 if (matResponse.CourseWork != null)
                 {
-                    foreach (var m in matResponse.CourseWork.Where(w => w.WorkType == "MATERIAL"))
+                    foreach (var m in matResponse.CourseWork.Where(w =>
+                                 w.WorkType == "MATERIAL" ||
+                                 (w.Title != null && w.Title.Contains("Оголошення"))))
                     {
+                        string body = m.Description ?? "";
                         result.Add(new AnnouncementDto
                         {
                             Id = m.Id,
-                            Text = $"{m.Title}\n{m.Description}".Trim(),
+                            Text = $"<b>{m.Title}</b>" + (string.IsNullOrEmpty(body) ? "" : $"\n{body}"),
                             UpdateTime = (m.UpdateTime?.ToString() ?? m.CreationTime?.ToString() ?? "")
                         });
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+            }
 
             // Сортуємо від найновіших
             return result.OrderByDescending(a => a.UpdateTime).ToList();
@@ -291,7 +320,7 @@ namespace AntiTail.Services
             throw new InvalidOperationException("Використовуйте CreateAnnouncementAsync(courseId, text, accessToken).");
         }
 
-        public async Task CreateAnnouncementAsync(string courseId, string text, string accessToken)
+        public async Task CreateAnnouncementAsync(string courseId, string text, string accessToken, string teacherName = "Викладач")
         {
             var credential = GoogleCredential.FromAccessToken(accessToken);
             var classroomService = new ClassroomService(new Google.Apis.Services.BaseClientService.Initializer
@@ -300,14 +329,10 @@ namespace AntiTail.Services
                 ApplicationName = "AntiTailBot"
             });
 
-            // Використовуємо CourseWork типу MATERIAL:
-            // - не потребує оцінювання
-            // - відображається в стрічці курсу
-            // - надсилає push-сповіщення всім студентам курсу автоматично
             var material = new Google.Apis.Classroom.v1.Data.CourseWork
             {
-                Title = "📣 Оголошення від викладача",
-                Description = text,
+                Title = $"📣 Оголошення від {teacherName}",
+                Description = $"👤 {teacherName}\n\n{text}",
                 WorkType = "ASSIGNMENT",
                 State = "PUBLISHED"
             };

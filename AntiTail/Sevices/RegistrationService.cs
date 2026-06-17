@@ -45,6 +45,28 @@ public class RegistrationService : IRegistrationService
         Userinfo googleUser,
         TokenResponse tokens)
     {
+        // Перевіряємо чи викладач вже існує
+        var existing = await _db.Teachers.FirstOrDefaultAsync(t =>
+            t.GoogleId == googleUser.Id ||
+            t.CorporateEmail == googleUser.Email ||
+            t.TelegramChatId == telegramChatId);
+
+        if (existing != null)
+        {
+            existing.AccessToken    = tokens.AccessToken;
+            existing.RefreshToken   = tokens.RefreshToken ?? existing.RefreshToken;
+            existing.TokenExpiresAt = tokens.IssuedUtc.AddSeconds(tokens.ExpiresInSeconds ?? 3600);
+            existing.TelegramChatId = telegramChatId;
+            existing.GoogleId       = googleUser.Id;
+
+            await _db.SaveChangesAsync();
+
+            _logger.LogInformation("🔄 Оновлено існуючого викладача {Email} (TelegramId={TgId})",
+                existing.CorporateEmail, telegramChatId);
+
+            return existing;
+        }
+
         var teacher = new Teacher
         {
             FullName        = googleUser.Name ?? googleUser.Email,
@@ -71,6 +93,31 @@ public class RegistrationService : IRegistrationService
         TokenResponse tokens,
         int groupId)
     {
+        // Перевіряємо чи студент вже існує по GoogleId або email
+        var existing = await _db.Students.FirstOrDefaultAsync(s =>
+            s.GoogleId == googleUser.Id ||
+            s.CorporateEmail == googleUser.Email ||
+            s.TelegramChatId == telegramChatId);
+
+        if (existing != null)
+        {
+            // Оновлюємо токени і групу замість створення дубліката
+            existing.AccessToken    = tokens.AccessToken;
+            existing.RefreshToken   = tokens.RefreshToken ?? existing.RefreshToken;
+            existing.TokenExpiresAt = tokens.IssuedUtc.AddSeconds(tokens.ExpiresInSeconds ?? 3600);
+            existing.TelegramChatId = telegramChatId;
+            existing.GroupId        = groupId;
+            existing.GoogleId       = googleUser.Id;
+
+            await _db.SaveChangesAsync();
+
+            _logger.LogInformation("🔄 Оновлено існуючого студента {Email} (TelegramId={TgId})",
+                existing.CorporateEmail, telegramChatId);
+
+            return existing;
+        }
+
+        // Новий студент
         var student = new Student
         {
             FullName        = googleUser.Name ?? googleUser.Email,

@@ -119,8 +119,12 @@ public class Worker : BackgroundService
                         $"💬: {text}";
                     try
                     {
+                        var replyButton = new InlineKeyboardMarkup(new[]
+                        {
+                            new[] { InlineKeyboardButton.WithCallbackData("↩️ Відповісти студенту", $"reply_student:{chatId}") }
+                        });
                         await bot.SendMessage(chosenTeacher.TelegramChatId, msgToTeacher,
-                            parseMode: ParseMode.Html, cancellationToken: ct);
+                            parseMode: ParseMode.Html, replyMarkup: replyButton, cancellationToken: ct);
                         await bot.SendMessage(chatId,
                             $"✅ Повідомлення надіслано викладачу {chosenTeacher.FullName}!",
                             replyMarkup: StudentMainMenu(), cancellationToken: ct);
@@ -143,6 +147,30 @@ public class Worker : BackgroundService
 
                 session.Step = RegistrationStep.Completed;
                 session.PendingTeacherId = null;
+                _sessions.Save(chatId, session);
+                return;
+            }
+            
+            if (session.Step == RegistrationStep.TeacherAwaitingReplyToStudent)
+            {
+                if (session.PendingStudentChatId.HasValue)
+                {
+                    try
+                    {
+                        await bot.SendMessage(session.PendingStudentChatId.Value,
+                            $"📩 <b>Відповідь від викладача:</b>\n\n💬 {text}",
+                            parseMode: ParseMode.Html, cancellationToken: ct);
+                        await bot.SendMessage(chatId, "✅ Відповідь надіслана студенту!",
+                            replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+                    }
+                    catch
+                    {
+                        await bot.SendMessage(chatId, "❌ Не вдалося надіслати відповідь.",
+                            replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+                    }
+                }
+                session.Step = RegistrationStep.Completed;
+                session.PendingStudentChatId = null;
                 _sessions.Save(chatId, session);
                 return;
             }
@@ -270,7 +298,7 @@ public class Worker : BackgroundService
 
                 try
                 {
-                    await classroomSvc.CreateAnnouncementAsync(session.PendingCourseId, text, teacher.AccessToken);
+                    await classroomSvc.CreateAnnouncementAsync(session.PendingCourseId, text, teacher.AccessToken, teacher.FullName);
                     session.Step = RegistrationStep.Completed;
                     session.PendingCourseId = null;
                     _sessions.Save(chatId, session);
@@ -662,6 +690,26 @@ public class Worker : BackgroundService
 
         var adminSvc = scope.ServiceProvider.GetRequiredService<IAdminService>();
         var admin = await adminSvc.FindAdminByTelegramIdAsync(chatId);
+        var reg = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
+        var teacher = await reg.FindTeacherByTelegramIdAsync(chatId);
+
+// Якщо людина є і адміном і викладачем — даємо вибір
+        if (admin is not null && teacher is not null)
+        {
+            session.Step = RegistrationStep.AwaitingRole;
+            _sessions.Save(chatId, session);
+            await bot.SendMessage(chatId,
+                $"👋 Вітаємо, {admin.FullName}!\n\nВи зареєстровані і як <b>Адміністратор</b>, і як <b>Викладач</b>.\nОберіть роль для цього сеансу:",
+                parseMode: ParseMode.Html,
+                replyMarkup: new InlineKeyboardMarkup(new[]
+                {
+                    new[] { InlineKeyboardButton.WithCallbackData("👑 Адміністратор", "role_select:admin") },
+                    new[] { InlineKeyboardButton.WithCallbackData("👨‍🏫 Викладач", "role_select:teacher") }
+                }),
+                cancellationToken: ct);
+            return;
+        }
+
         if (admin is not null)
         {
             session.Step = RegistrationStep.Completed;
@@ -673,9 +721,6 @@ public class Worker : BackgroundService
             return;
         }
 
-        var reg = scope.ServiceProvider.GetRequiredService<IRegistrationService>();
-
-        var teacher = await reg.FindTeacherByTelegramIdAsync(chatId);
         if (teacher is not null)
         {
             session.Step = RegistrationStep.Completed;
@@ -744,7 +789,34 @@ public class Worker : BackgroundService
             await HandleRoleSelectedAsync(bot, chatId, UserRole.Teacher, session, ct);
             return;
         }
+        
+        // Вибір ролі для адміна-викладача
+        if (data == "role_select:admin")
+        {
+            using var scopeRs = _scopeFactory.CreateScope();
+            var adminSvcRs = scopeRs.ServiceProvider.GetRequiredService<IAdminService>();
+            var adminRs = await adminSvcRs.FindAdminByTelegramIdAsync(chatId);
+            if (adminRs == null) { await bot.SendMessage(chatId, "❌ Адміна не знайдено.", cancellationToken: ct); return; }
+            session.Step = RegistrationStep.Completed;
+            session.Role = UserRole.Admin;
+            _sessions.Save(chatId, session);
+            await bot.SendMessage(chatId, $"👑 Ви увійшли як Адміністратор.", replyMarkup: AdminMainMenu(), cancellationToken: ct);
+            return;
+        }
 
+        if (data == "role_select:teacher")
+        {
+            using var scopeRs = _scopeFactory.CreateScope();
+            var regRs = scopeRs.ServiceProvider.GetRequiredService<IRegistrationService>();
+            var teacherRs = await regRs.FindTeacherByTelegramIdAsync(chatId);
+            if (teacherRs == null) { await bot.SendMessage(chatId, "❌ Викладача не знайдено.", cancellationToken: ct); return; }
+            session.Step = RegistrationStep.Completed;
+            session.Role = UserRole.Teacher;
+            _sessions.Save(chatId, session);
+            await bot.SendMessage(chatId, $"👨‍🏫 Ви увійшли як Викладач.", replyMarkup: TeacherMainMenu(), cancellationToken: ct);
+            return;
+        }
+        
         // Вибір групи студентом
         if (data.StartsWith("group:") && int.TryParse(data["group:".Length..], out int gid))
         {
@@ -817,6 +889,17 @@ public class Worker : BackgroundService
             _sessions.Save(chatId, session);
             await bot.SendMessage(chatId,
                 $"Напишіть ваше повідомлення для {teacher.FullName}:\n\n(або /cancel для відміни)",
+                cancellationToken: ct);
+            return;
+        }
+        // Викладач натиснув "Відповісти студенту"
+        if (data.StartsWith("reply_student:") && long.TryParse(data["reply_student:".Length..], out long studentChatId))
+        {
+            session.PendingStudentChatId = studentChatId;
+            session.Step = RegistrationStep.TeacherAwaitingReplyToStudent;
+            _sessions.Save(chatId, session);
+            await bot.SendMessage(chatId,
+                "✏️ Напишіть відповідь студенту:\n\n(або /cancel для відміни)",
                 cancellationToken: ct);
             return;
         }

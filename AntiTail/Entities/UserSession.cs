@@ -19,6 +19,7 @@ public class UserSession
     public string? PendingAssignmentId { get; set; }
     public string? PendingSubmissionId { get; set; }
     public int? PendingTeacherId { get; set; }
+    public long? PendingStudentChatId { get; set; }
 }
  
 public enum RegistrationStep
@@ -49,7 +50,8 @@ public enum RegistrationStep
        TeacherAwaitingGradeValue,
        TeacherAwaitingCourseBindingSelectCourse,
        TeacherAwaitingCourseBindingSelectGroup,
-       StudentAwaitingTeacherMessage
+       StudentAwaitingTeacherMessage,
+       TeacherAwaitingReplyToStudent
 }
  
 public enum UserRole
